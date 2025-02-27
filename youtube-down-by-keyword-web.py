@@ -3,6 +3,8 @@ import time
 import subprocess
 import datetime
 import re
+import traceback
+import locale
 
 from flask import Flask, request, render_template_string, Response, send_from_directory
 from youtubesearchpython import VideosSearch
@@ -11,6 +13,7 @@ app = Flask(__name__)
 
 # Windows 다운로드 폴더 경로
 DOWNLOAD_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
+# encoding = locale.getpreferredencoding(False)
 
 ######################
 # secure_filename 대체
@@ -36,21 +39,27 @@ def download_video_with_ytdlp(video_url, output_path):
     # 1) 파일 경로 확인
     cmd_get_filename = [
         'yt-dlp',
+        '--paths', output_path,
         '--get-filename',
-        '-o', os.path.join(output_path, '%(title)s.%(ext)s'),
+        '-o', '%(title)s.%(ext)s',
         video_url
     ]
+
     r_filename = subprocess.run(cmd_get_filename, capture_output=True, text=True)
+    print(f"r_filename: {r_filename}")
     if r_filename.returncode != 0:
         raise Exception(f"Failed to get filename: {r_filename.stderr.strip()}")
+
     final_path = r_filename.stdout.strip()
 
     # 2) 실제 다운로드
     cmd_download = [
         'yt-dlp',
-        '-o', os.path.join(output_path, '%(title)s.%(ext)s'),
+        '--paths', output_path,
+        '-o', final_path,
         video_url
     ]
+    
     r_download = subprocess.run(cmd_download, capture_output=True, text=True)
     if r_download.returncode != 0:
         raise Exception(f"Download error: {r_download.stderr.strip()}")
@@ -59,14 +68,17 @@ def download_video_with_ytdlp(video_url, output_path):
     #    다운로드가 끝나면, 실제로 생성된 파일(final_path)을 custom_secure_filename으로 바꿔줍니다.
     base_dir = os.path.dirname(final_path)
     original_name = os.path.basename(final_path)
-    new_name = custom_secure_filename(original_name)
+    new_name = original_name
+    # new_name = custom_secure_filename(original_name)
     new_path = os.path.join(base_dir, new_name)
 
+    print(f"new_path: {new_path}")
     # 같은 이름이면 변경 불필요
     if new_path != final_path:
         os.rename(final_path, new_path)
 
     # 4) 수정/접근 시간 현재 시각으로 맞춤 (Windows 탐색기에서 '수정된 날짜'가 최신으로 표시)
+    print("4) 수정/접근 시간 현재 시각으로 맞춤\n\n")
     current_time = time.time()
     os.utime(new_path, (current_time, current_time))
 
@@ -240,13 +252,17 @@ def sse_download():
                 for idx, item in enumerate(results, start=1):
                     video_id = item['id']
                     video_url = f'https://www.youtube.com/watch?v={video_id}'
+                    print(f"video_url: {video_url}")
                     try:
                         saved_path = download_video_with_ytdlp(video_url, DOWNLOAD_FOLDER)
+                        print(f"saved_path: {saved_path}")
 
                         # 링크용 파일명 (파일명만 따서 URL-encode)
                         filename_only = os.path.basename(saved_path)
-                        safe_name = custom_secure_filename(filename_only)  # 디렉토리 탈출/위험 문자 방지
-                        encoded_name = quote(safe_name)
+                        # safe_name = custom_secure_filename(filename_only)  # 디렉토리 탈출/위험 문자 방지
+                        safe_name = filename_only  # 디렉토리 탈출/위험 문자 방지
+                        # encoded_name = quote(safe_name)
+                        encoded_name = safe_name
 
                         # 메시지에 링크(a태그) 포함
                         download_link = f'<a href="/downloadfile?filename={encoded_name}" download>다운로드</a>'
@@ -254,10 +270,12 @@ def sse_download():
                         yield f"data: {idx}번째 다운로드 완료! ({saved_path}) {download_link}\n\n"
                     except Exception as e:
                         yield f"data: {idx}번째 영상 오류: {str(e)}\n\n"
+                        print(traceback.format_exc(), flush=True)
                 yield f"data: 다운로드가 모두 끝났습니다.\n\n"
 
         except Exception as e:
             yield f"data: 오류가 발생했습니다: {str(e)}\n\n"
+            print(traceback.format_exc(), flush=True)
 
     return Response(generate(), mimetype="text/event-stream")
 
@@ -274,8 +292,10 @@ def downloadfile():
     filename = request.args.get("filename", "")
     # URL 디코딩
     filename = unquote(filename)
+    print(f"downloadfile() filename: {filename}")
     # 보안상 안전한 파일명으로 변환 (디렉토리 탈출 등 방지)
-    safe_name = custom_secure_filename(filename)
+    # safe_name = custom_secure_filename(filename)
+    safe_name = filename
 
     # 실제로 DOWNLOAD_FOLDER 안에 safe_name 파일이 있어야만 성공
     if not safe_name:
